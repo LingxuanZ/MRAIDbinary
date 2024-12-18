@@ -159,6 +159,7 @@ gibbs_probit_binary= function(x, y,Zx,Zy, lambda_beta1, lambda_beta2, lambda_c1,
   n2 = length(y)
   p = dim(Zx)[2]
   ystar = rep(0, n2)
+  xstar = rep(0,n1)
   beta_res = c()
   alpha_res = c()
   ystar_res = c()
@@ -411,4 +412,52 @@ gibbs_probit_binary= function(x, y,Zx,Zy, lambda_beta1, lambda_beta2, lambda_c1,
               alpha_sd = alpha_sd,sigma_ita = sigma_ita_est, sigmaX = sigmaX_est,
               sigmaY = sigmaY_est,beta_res = beta_res, ystar_res = ystar_res, 
               alpha_res = alpha_res))
+}
+
+
+# Function to rerun the target function immediately when specific warnings occur
+run_with_warning_check <- function(retry_function, max_attempts = 15, ..., warning_keyword = "NAs produced") {
+  # retry_function: The target function to execute (e.g., gibbs_probit_binary)
+  # max_attempts: Maximum number of retry attempts
+  # warning_keyword: The specific warning message to trigger a retry
+  # ...: Arguments to pass to the target function
+  
+  attempt <- 1  # Initialize attempt counter
+  result <- NULL  # Variable to store function result
+  
+  repeat {
+    # Try running the function and handle warnings
+    result <- tryCatch(
+      withCallingHandlers(
+        retry_function(...),  # Execute the target function
+        warning = function(w) {
+          # Check if the warning message contains the specified keyword
+          if (grepl(warning_keyword, conditionMessage(w))) {
+            message(sprintf("Warning detected on attempt %d: %s", attempt, conditionMessage(w)))
+            stop("Triggering function retry due to specific warning.")  # Terminate the current execution
+          }
+        }
+      ),
+      error = function(e) {
+        # Handle errors (e.g., triggered by stop)
+        message(sprintf("Retrying function due to warning on attempt %d...", attempt))
+        NULL
+      }
+    )
+    
+    # Exit if successful or maximum attempts reached
+    if (!is.null(result) || attempt >= max_attempts) {
+      if (is.null(result) && attempt >= max_attempts) {
+        message("Maximum attempts reached. Returning NULL.")
+      } else {
+        message("Function completed successfully without critical warnings.")
+      }
+      break
+    }
+    
+    # Increment attempt counter and retry
+    attempt <- attempt + 1
+  }
+  
+  return(result)  # Return the result or NULL if failed
 }
