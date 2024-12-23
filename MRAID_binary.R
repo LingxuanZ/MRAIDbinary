@@ -6,7 +6,7 @@ library(invgamma)
 
 
 sourceCpp(code='
-#include <Rcpp.h>
+#include <RcppEigen.h>
 using namespace Rcpp;
 
 // [[Rcpp::export]]
@@ -20,12 +20,47 @@ double safe_exp(double x) {
   if (x < -745) return exp(-745); 
   return exp(x);
 }
+
+// [[Rcpp::depends(RcppEigen)]]
 // [[Rcpp::export]]
-List update_parameters(NumericVector beta_iter, NumericVector ita_u_iter, 
-                       NumericVector gamma_iter, NumericVector tau_iter, NumericVector v_iter,
+Eigen::MatrixXd removeColumn(Eigen::MatrixXd matrix, int j) {
+    int nrow = matrix.rows(); 
+    int ncol = matrix.cols(); 
+    if (j < 0 || j >= ncol) {
+        Rcpp::stop("Index j is out of range!");
+    }
+    Eigen::MatrixXd result(nrow, ncol - 1);
+    if (j > 0) {
+        result.block(0, 0, nrow, j) = matrix.block(0, 0, nrow, j);
+    }
+    if (j < ncol - 1) {
+        result.block(0, j, nrow, ncol - j - 1) = matrix.block(0, j + 1, nrow, ncol - j - 1);
+    }
+    return result;
+}
+
+// [[Rcpp::depends(RcppEigen)]]
+// [[Rcpp::export]]
+Eigen::VectorXd removeElement(Eigen::VectorXd vec, int j) {
+    int n = vec.size(); 
+    if (j < 0 || j >= n) {
+        Rcpp::stop("Index j is out of range!");
+    }
+    Eigen::VectorXd result(n - 1);
+    for (int i = 0, newIndex = 0; i < n; ++i) {
+        if (i == j) continue; 
+        result[newIndex++] = vec[i];
+    }
+    return result;
+}
+
+// [[Rcpp::depends(RcppEigen)]]
+// [[Rcpp::export]]
+List update_parameters(Eigen::VectorXd beta_iter, Eigen::VectorXd ita_u_iter, 
+                       Eigen::VectorXd gamma_iter, Eigen::VectorXd tau_iter, Eigen::VectorXd v_iter,
                        double alpha_iter, double rho_iter, double sigmaY_iter, double sigmaX_iter, 
                        double sigma_beta_iter, double sigma_ita_iter,
-                       NumericMatrix Zy, NumericMatrix Zx, NumericVector ystar, NumericVector x,
+                       Eigen::MatrixXd Zy, Eigen::MatrixXd Zx, Eigen::VectorXd ystar, Eigen::VectorXd x,
                        int n1, int n2, double pi_beta_iter, double pi_1_iter, double pi_0_iter,
                        double pi_c_iter) {
   int J = beta_iter.size(); // Number of variables
@@ -36,110 +71,141 @@ List update_parameters(NumericVector beta_iter, NumericVector ita_u_iter,
     double prob_gamma_1, prob_gamma_0, prob_tau_1, prob_tau_0, prob_v_1, prob_v_0;
 
     // Update beta_j
-    if (gamma_iter[j] == 1) {
-      K1 = pow(alpha_iter + rho_iter * v_iter[j], 2) * (n2 - 1) / pow(sigmaY_iter, 2)
+    if (gamma_iter(j) == 1) {
+      K1 = pow(alpha_iter + rho_iter * v_iter(j), 2) * (n2 - 1) / pow(sigmaY_iter, 2)
            + (n1 - 1) / pow(sigmaX_iter, 2) + 1 / pow(sigma_beta_iter, 2);
       if (K1 < 1e-8) K1 = 1e-8;
-      mu_beta_j = ((alpha_iter + rho_iter * v_iter[j]) *
-                  sum((ystar - alpha_iter * Zy(_, j) - rho_iter * Zy(_, j) - Zy(_, j)) * Zy(_, j)) / pow(sigmaY_iter, 2)
-                  + sum((x - Zx(_, j)) * Zx(_, j)) / pow(sigmaX_iter, 2)) / K1;
-      beta_iter[j] = R::rnorm(mu_beta_j, sqrt(1 / K1));
+      
+      Eigen::MatrixXd Zy_sub = removeColumn(Zy, j);
+      Eigen::VectorXd beta_sub = removeElement(beta_iter, j);
+      Eigen::VectorXd v_sub = removeElement(v_iter, j);
+      Eigen::VectorXd residual = ystar - alpha_iter * Zy_sub * beta_sub -
+                           rho_iter * Zy_sub * beta_sub.cwiseProduct(v_sub) -
+                           Zy * ita_u_iter;
+      Eigen::MatrixXd Zx_sub = removeColumn(Zx, j);
+      Eigen::VectorXd x_residual = x - Zx_sub * beta_sub;
+      double term1 = (residual.transpose() * Zy.col(j)).value() / pow(sigmaY_iter, 2);
+      double term2 = (x_residual.transpose() * Zx.col(j)).value() / pow(sigmaX_iter, 2);
+      mu_beta_j = ((alpha_iter + rho_iter * v_iter(j)) * term1 + term2) / K1;
+
+      beta_iter(j) = R::rnorm(mu_beta_j, sqrt(1 / K1));
     } else {
-      K1 = pow(alpha_iter + rho_iter * v_iter[j], 2) * (n2 - 1) / pow(sigmaY_iter, 2)
-             + (n1 - 1) / pow(sigmaX_iter, 2);
+      K1 = pow(alpha_iter + rho_iter * v_iter(j), 2) * (n2 - 1) / pow(sigmaY_iter, 2)
+           + (n1 - 1) / pow(sigmaX_iter, 2);
       if (K1 < 1e-8) K1 = 1e-8;
-      mu_beta_j = ((alpha_iter + rho_iter * v_iter[j]) *
-                  sum((ystar - alpha_iter * Zy(_, j) - rho_iter * Zy(_, j) - Zy(_, j)) * Zy(_, j)) / pow(sigmaY_iter, 2)
-                  + sum((x - Zx(_, j)) * Zx(_, j)) / pow(sigmaX_iter, 2)) / K1;
-
-      beta_iter[j] = 0;
+      
+      Eigen::MatrixXd Zy_sub = removeColumn(Zy, j);
+      Eigen::VectorXd beta_sub = removeElement(beta_iter, j);
+      Eigen::VectorXd v_sub = removeElement(v_iter, j);
+      Eigen::VectorXd residual = ystar - alpha_iter * Zy_sub * beta_sub -
+                           rho_iter * Zy_sub * beta_sub.cwiseProduct(v_sub) -
+                           Zy * ita_u_iter;
+      Eigen::MatrixXd Zx_sub = removeColumn(Zx, j);
+      Eigen::VectorXd x_residual = x - Zx_sub * beta_sub;
+      double term1 = (residual.transpose() * Zy.col(j)).value() / pow(sigmaY_iter, 2);
+      double term2 = (x_residual.transpose() * Zx.col(j)).value() / pow(sigmaX_iter, 2);
+      mu_beta_j = ((alpha_iter + rho_iter * v_iter(j)) * term1 + term2) / K1;
+      
+      beta_iter(j) = 0;
     }
-      
-      
-
+    
+    
     // Update ita_uj 
-    if (tau_iter[j] == 1) {
+    if (tau_iter(j) == 1) {
       K2 = (n2 - 1) / pow(sigmaY_iter, 2) + 1 / pow(sigma_ita_iter, 2);
       if (K2 < 1e-8) K2 = 1e-8;
-      mu_ita_j = sum((ystar - alpha_iter * Zy(_, j)) * Zy(_, j)) / pow(sigmaY_iter, 2) / K2;
-      ita_u_iter[j] = R::rnorm(mu_ita_j, sqrt(1 / K2));
+      Eigen::VectorXd ita_u_sub = removeElement(ita_u_iter, j);
+      Eigen::MatrixXd Zy_sub = removeColumn(Zy, j);
+      Eigen::VectorXd residual = ystar - Zy_sub * ita_u_sub -
+                           alpha_iter * Zy * beta_iter - 
+                           rho_iter*Zy*beta_iter.cwiseProduct(v_iter);
+      double term1 = (residual.transpose() * Zy.col(j)).value() / pow(sigmaY_iter, 2);
+      mu_ita_j = term1/ K2;
+      ita_u_iter(j) = R::rnorm(mu_ita_j, sqrt(1 / K2));
     } else {
       K2 = (n2 - 1) / pow(sigmaY_iter, 2);
       if (K2 < 1e-8) K2 = 1e-8;
-      mu_ita_j = sum((ystar - alpha_iter * Zy(_, j)) * Zy(_, j)) / pow(sigmaY_iter, 2) / K2;
-      ita_u_iter[j] = 0;
+      Eigen::VectorXd ita_u_sub = removeElement(ita_u_iter, j);
+      Eigen::MatrixXd Zy_sub = removeColumn(Zy, j);
+      Eigen::VectorXd residual = ystar - Zy_sub * ita_u_sub -
+                           alpha_iter * Zy * beta_iter - 
+                           rho_iter*Zy*beta_iter.cwiseProduct(v_iter);
+      double term1 = (residual.transpose() * Zy.col(j)).value() / pow(sigmaY_iter, 2);
+      mu_ita_j = term1/ K2;
+      ita_u_iter(j) = 0;
     }
-
     
-
+    
     // Update gamma_j
-    if (gamma_iter[j] == 1) {
-      log_prob_gamma_1 = (pow(mu_beta_j, 2) / (2 * 1 / K1)) + 0.5 * safe_log(1 / K1) 
-      - 0.5 * safe_log(pow(sigma_beta_iter, 2)) + safe_log(pi_beta_iter) + tau_iter[j] * safe_log(pi_1_iter) + (1 - tau_iter[j]) * safe_log(1 - pi_1_iter) + v_iter[j] * safe_log(pi_c_iter) + (1 - v_iter[j]) * safe_log(1 - pi_c_iter);
-      log_prob_gamma_0 = safe_log(1 - pi_beta_iter) + tau_iter[j] * safe_log(pi_0_iter)
-                         + (1 - tau_iter[j]) * safe_log(1 - pi_0_iter);
+    if (gamma_iter(j) == 1) {
+      log_prob_gamma_1 = (pow(mu_beta_j, 2) / (2 * 1 / K1)) + 0.5 * safe_log(1 / K1) - 0.5 * safe_log(pow(sigma_beta_iter, 2)) + safe_log(pi_beta_iter) + tau_iter(j) * safe_log(pi_1_iter) + (1 - tau_iter(j)) * safe_log(1 - pi_1_iter) + v_iter(j) * safe_log(pi_c_iter) + (1 - v_iter(j)) * safe_log(1 - pi_c_iter);
+      log_prob_gamma_0 = safe_log(1 - pi_beta_iter) + tau_iter(j) * safe_log(pi_0_iter) + 
+                          (1 - tau_iter(j)) * safe_log(1 - pi_0_iter);
   
       double max_log_prob = std::max(log_prob_gamma_1, log_prob_gamma_0);
       prob_gamma_1 = safe_exp(log_prob_gamma_1 - max_log_prob);
       prob_gamma_0 = safe_exp(log_prob_gamma_0 - max_log_prob);
       double prob_sum = prob_gamma_1 + prob_gamma_0;
-      gamma_iter[j] = R::rbinom(1, prob_gamma_1 / prob_sum);
+      gamma_iter(j) = R::rbinom(1, prob_gamma_1 / prob_sum);
     } else {
-      log_prob_gamma_1 =  (pow(mu_beta_j, 2) / (2 * 1 / K1)) + 0.5 * safe_log(1 / K1)
-                    - 0.5 * safe_log(pow(sigma_beta_iter, 2)) 
-                   + safe_log(pi_beta_iter)
-                   + tau_iter[j] * safe_log(pi_1_iter) 
-                   + (1 - tau_iter[j]) * safe_log(1 - pi_1_iter)
-                   + v_iter[j] * safe_log(pi_c_iter) 
-                   + (1 - v_iter[j]) * safe_log(1 - pi_c_iter);
-      log_prob_gamma_0 = safe_log(1 - pi_beta_iter) + tau_iter[j] * safe_log(pi_0_iter)
-                         + (1 - tau_iter[j]) * safe_log(1 - pi_0_iter);
+      log_prob_gamma_1 = (pow(mu_beta_j, 2) / (2 * 1 / K1)) + 0.5 * safe_log(1 / K1) - 0.5 * safe_log(pow(sigma_beta_iter, 2)) + safe_log(pi_beta_iter) + tau_iter(j) * safe_log(pi_1_iter) + (1 - tau_iter(j)) * safe_log(1 - pi_1_iter) + v_iter(j) * safe_log(pi_c_iter) + (1 - v_iter(j)) * safe_log(1 - pi_c_iter);
+      log_prob_gamma_0 = safe_log(1 - pi_beta_iter) + tau_iter(j) * safe_log(pi_0_iter) + 
+                          (1 - tau_iter(j)) * safe_log(1 - pi_0_iter);
   
       double max_log_prob = std::max(log_prob_gamma_1, log_prob_gamma_0);
       prob_gamma_1 = safe_exp(log_prob_gamma_1 - max_log_prob);
       prob_gamma_0 = safe_exp(log_prob_gamma_0 - max_log_prob);
       double prob_sum = prob_gamma_1 + prob_gamma_0;
-      gamma_iter[j] = R::rbinom(1, prob_gamma_1 / prob_sum);
+      gamma_iter(j) = R::rbinom(1, prob_gamma_1 / prob_sum);
     }
     
-
+    
     // Update tau_j
-    if (tau_iter[j] == 1) {
-      log_prob_tau_1 = (pow(mu_ita_j, 2) / (2 * 1 / K2)) + 0.5 * safe_log(1 / K2) 
-      - 0.5 * safe_log(pow(sigma_ita_iter, 2)) + gamma_iter[j] * safe_log(pi_1_iter) + (1 - gamma_iter[j]) * safe_log(pi_0_iter);
-      log_prob_tau_0 = gamma_iter[j] * safe_log(1 - pi_1_iter) + (1 - gamma_iter[j]) * safe_log(1 - pi_0_iter);
+    if (tau_iter(j) == 1) {
+      log_prob_tau_1 = (pow(mu_ita_j, 2) / (2 * 1 / K2)) + 0.5 * safe_log(1 / K2) - 
+                        0.5 * safe_log(pow(sigma_ita_iter, 2)) + gamma_iter(j) * safe_log(pi_1_iter) + 
+                        (1 - gamma_iter(j)) * safe_log(pi_0_iter);
+      log_prob_tau_0 = gamma_iter(j) * safe_log(1 - pi_1_iter) + (1 - gamma_iter(j)) * safe_log(1 - pi_0_iter);
   
       double max_log_prob = std::max(log_prob_tau_1, log_prob_tau_0);
       double prob_tau_1 = safe_exp(log_prob_tau_1 - max_log_prob);
       double prob_tau_0 = safe_exp(log_prob_tau_0 - max_log_prob);
       double prob_sum = prob_tau_1 + prob_tau_0;
-      tau_iter[j] = R::rbinom(1, prob_tau_1 / prob_sum);
+      tau_iter(j) = R::rbinom(1, prob_tau_1 / prob_sum);
     } else {
-      log_prob_tau_1 =  (pow(mu_ita_j, 2) / (2 * 1 / K2)) + 0.5 * safe_log(1 / K2) - 0.5 * safe_log(pow(sigma_ita_iter, 2)) + gamma_iter[j] * safe_log(pi_1_iter) + (1 - gamma_iter[j]) * safe_log(pi_0_iter);
-      log_prob_tau_0 = gamma_iter[j] * safe_log(1 - pi_1_iter) + (1 - gamma_iter[j]) * safe_log(1 - pi_0_iter);
+      log_prob_tau_1 = (pow(mu_ita_j, 2) / (2 * 1 / K2)) + 0.5 * safe_log(1 / K2) - 
+                        0.5 * safe_log(pow(sigma_ita_iter, 2)) + gamma_iter(j) * safe_log(pi_1_iter) + 
+                        (1 - gamma_iter(j)) * safe_log(pi_0_iter);
+      log_prob_tau_0 = gamma_iter(j) * safe_log(1 - pi_1_iter) + (1 - gamma_iter(j)) * safe_log(1 - pi_0_iter);
   
       max_log_prob = std::max(log_prob_tau_1, log_prob_tau_0);
       prob_tau_1 = safe_exp(log_prob_tau_1 - max_log_prob);
       prob_tau_0 = safe_exp(log_prob_tau_0 - max_log_prob);
       prob_sum = prob_tau_1 + prob_tau_0;
-      tau_iter[j] = R::rbinom(1, prob_tau_1 / prob_sum);
+      tau_iter(j) = R::rbinom(1, prob_tau_1 / prob_sum);
     }
-
     
-
-    // Update v_j
-    log_prob_v_1 = -((pow(rho_iter * beta_iter[j], 2) * (n2 - 1)
-                      - 2 * sum((ystar - alpha_iter * Zy(_, j)) * Zy(_, j)) * beta_iter[j] * rho_iter)
-                     / (2 * pow(sigmaY_iter, 2))) + gamma_iter[j] * safe_log(pi_c_iter);
-    log_prob_v_0 = gamma_iter[j] * safe_log(1 - pi_c_iter);
+    
+     // Update v_j
+    Eigen::MatrixXd Zy_sub = removeColumn(Zy, j);
+    Eigen::VectorXd beta_sub = removeElement(beta_iter, j);
+    Eigen::VectorXd v_sub = removeElement(v_iter, j);
+    Eigen::VectorXd residual = ystar - alpha_iter * Zy * beta_iter -
+                         rho_iter * Zy_sub * beta_sub.cwiseProduct(v_sub) -
+                         Zy * ita_u_iter;
+    double term1 = (residual.transpose() * Zy.col(j)).value()*beta_iter(j)*rho_iter;
+    log_prob_v_1 = -(pow((rho_iter * beta_iter(j)), 2) * (n2 - 1) - 
+                      2*term1) / (2 * pow(sigmaY_iter, 2)) + gamma_iter(j) * safe_log(pi_c_iter);
+    log_prob_v_0 = gamma_iter(j) * safe_log(1 - pi_c_iter);
 
     max_log_prob = std::max(log_prob_v_1, log_prob_v_0);
     prob_v_1 = safe_exp(log_prob_v_1 - max_log_prob);
     prob_v_0 = safe_exp(log_prob_v_0 - max_log_prob);
     prob_sum = prob_v_1 + prob_v_0;
-    v_iter[j] = R::rbinom(1, prob_v_1 / prob_sum);
-  }
-
+    v_iter(j) = R::rbinom(1, prob_v_1 / prob_sum);
+  
+    
+  }    
   return List::create(Named("beta_iter") = beta_iter,
                       Named("ita_u_iter") = ita_u_iter,
                       Named("gamma_iter") = gamma_iter,
